@@ -1,7 +1,13 @@
 from typing import Tuple, List, Dict
 from pathlib import Path
 from config import *
+import matplotlib.pyplot as plt
+import matplotlib.cm as cm
 
+import numpy as np
+
+import seaborn as sns
+import matplotlib.pyplot as plt
 import numpy as np
 
 
@@ -22,6 +28,7 @@ class NetworkPositions:
     centers: Dict[str, jnp.array]
     positions: Dict[str, jnp.array]
     anchors: Dict[str, jnp.array]
+    rf_radius: Dict[str, jnp.array]
 
     # neighborhood_indices: PxQ matrix mapping Neigborhoods Position of Block onto Cortical Sheet
     neighborhood_indices: Dict[str, jnp.array]
@@ -35,13 +42,13 @@ class NetworkPositions:
 
     def createNetworkPositions(self, key, model_units):
         # Creates Network Positions based on CNN Units per Layer
-        common_blocks = model_units.keys() & brain_mapping.keys()  # set intersection
-        self.dims = {k: model_units[k].shape[1:] for k in common_blocks}
+        common_blocks = model_units.keys() & BRAIN_MAPPING.keys()  # set intersection
+        self.dims = {k: model_units[k][::-1] for k in common_blocks}
         centers, positions, neighborhood_indices, neighborhood_widths = {}, {}, {}, {}
-        anchors = {}
+        anchors, rf_radius = {}, {}
 
         for block in common_blocks:
-            brain_area = brain_mapping[block]
+            brain_area = BRAIN_MAPPING[block]
             tissue_size = TISSUE_SIZES[brain_area]
             neighborhood_width = NEIGHBORHOOD_WIDTHS[brain_area]
 
@@ -51,6 +58,7 @@ class NetworkPositions:
             anchors[block] = anchors_block
 
             positions[block] = positions_block
+            rf_radius[block] = rf_radius_block
 
             centers[block] = sample_centers(key, positions_block, NEIGHBORHOOD_WIDTHS[brain_area] / 2, N_NEIGHBORHOODS)
 
@@ -65,13 +73,14 @@ class NetworkPositions:
         self.anchors = anchors
         self.centers = centers
         self.positions = positions
+        self.rf_radius = rf_radius
         self.neighborhood_indices = neighborhood_indices
         self.neighborhood_widths = neighborhood_widths
 
-    def save(self, save_dir: Path):
-        save_dir = Path(save_dir)
-        save_dir.mkdir(exist_ok=True, parents=True)
-        path = save_dir / f"{self.name}.pkl"
+
+    def save(self, path: Path):
+        path = Path(path)
+        path.parent.mkdir(exist_ok=True, parents=True)
         with path.open("wb") as stream:
             pickle.dump(self, stream)
 
@@ -105,8 +114,117 @@ class NetworkPositions:
                 anchors= state["anchors"],
                 neighborhood_indices=state["neighborhood_indices"],
                 neighborhood_width=_scalar(state["neighborhood_width"]),
+                rf_radius = state["rf_radius"]
             )
         raise ValueError("suffix must be npz or pkl")
+
+    def plot_block_sns(self, block: str, plot_type: str = "positions", display_centers:bool = True):
+        """
+        Plot either 'positions' or 'anchors' for a given block with prism coloring.
+
+        Args:
+            block (str): Name of the block to plot.
+            plot_type (str): Either 'positions' or 'anchors'. Defaults to 'positions'.
+
+        Returns:
+            tuple: (fig, ax) matplotlib figure and axis.
+        """
+        if block not in self.positions:
+            raise ValueError(f"Block '{block}' not found. Available blocks: {list(self.positions.keys())}")
+
+        fig, ax = plt.subplots(figsize=(7, 6))
+
+        if plot_type == "positions":
+            positions = self.positions[block]
+            neighborhood_indices = self.neighborhood_indices[block]
+
+            # Combine all positions and cluster labels
+            all_pts = np.vstack([positions[idxs] for idxs in neighborhood_indices])
+            cluster_labels = np.concatenate([np.full(len(idxs), i) for i, idxs in enumerate(neighborhood_indices)])
+
+        elif plot_type == "anchors":
+            if not hasattr(self, "anchors") or block not in self.anchors:
+                raise ValueError(f"No anchors found for block '{block}'")
+
+            all_pts = self.anchors[block]
+            cluster_labels = np.arange(len(all_pts))  # one cluster per anchor
+        else:
+            raise ValueError("plot_type must be either 'positions' or 'anchors'")
+
+        sns.scatterplot(
+            x=all_pts[:, 0],
+            y=all_pts[:, 1],
+            hue=cluster_labels,
+            palette="prism",
+            ax=ax,
+            s=20,
+            alpha=0.6,
+            legend=False
+        )
+
+        # Plot centers
+        centers = self.centers[block]
+        if display_centers:
+            ax.scatter(centers[:, 0], centers[:, 1], s=60, color='black', marker='x', label="Centers", alpha=0.5)
+
+        ax.set_title(f"{plot_type.capitalize()} for Block: {block}")
+        ax.set_xlabel("x-position")
+        ax.set_ylabel("y-position")
+        ax.set_aspect("equal", adjustable="box")
+
+        # Add colorbar
+        norm = plt.Normalize(cluster_labels.min(), cluster_labels.max())
+        sm = plt.cm.ScalarMappable(cmap="prism", norm=norm)
+        sm.set_array([])
+        cbar = fig.colorbar(sm, ax=ax, fraction=0.046, pad=0.04)
+        cbar.set_label("Channel Number")
+
+        plt.tight_layout()
+        return fig, ax
+
+    def plot_positions(self, block: str):
+        if block not in self.positions:
+            raise ValueError(f"Block '{block}' not found. Available blocks: {list(self.positions.keys())}")
+
+        centers = self.centers[block]
+        positions = self.positions[block]
+        neighborhood_indices = self.neighborhood_indices[block]
+
+        # Combine all positions and cluster labels
+        all_pts = np.vstack([positions[idxs] for idxs in neighborhood_indices])
+        cluster_labels = np.concatenate([np.full(len(idxs), i) for i, idxs in enumerate(neighborhood_indices)])
+
+        fig, ax = plt.subplots(figsize=(7, 6))
+
+        # Single Seaborn scatterplot
+        sns.scatterplot(
+            x=all_pts[:, 0],
+            y=all_pts[:, 1],
+            hue=cluster_labels,
+            palette="prism",
+            ax=ax,
+            s=20,
+            alpha=0.6,
+            legend=False
+        )
+
+        # Plot centers separately
+        ax.scatter(centers[:, 0], centers[:, 1], s=60, color='black', marker='x', label="Centers", alpha=0.5)
+
+        ax.set_title(f"Network Positions for Block: {block}")
+        ax.set_xlabel("x-position on Cortical Sheet")
+        ax.set_ylabel("y-position on Cortical Sheet")
+        ax.set_aspect("equal", adjustable="box")
+
+        # Add colorbar
+        norm = plt.Normalize(cluster_labels.min(), cluster_labels.max())
+        sm = plt.cm.ScalarMappable(cmap="prism", norm=norm)
+        sm.set_array([])
+        cbar = fig.colorbar(sm, ax=ax, fraction=0.046, pad=0.04)
+        cbar.set_label("Cluster Number")
+
+        plt.tight_layout()
+        return fig, ax
 
 
 def jitter_positions(key, pos: jnp.ndarray, jitter: float = 0.0):
@@ -271,6 +389,8 @@ def sample_neighbors_batch_vectorized(key, positions, centers, radii, n_neighbor
     # vmap over centers
     sampled_indices = jax.vmap(sample_center, in_axes=(0, 0, 0))(keys, mask, n_valid)
     return sampled_indices
+
+
 
 
 

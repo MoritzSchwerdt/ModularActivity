@@ -58,4 +58,7 @@ class SimCLR(nn.Module):
         model_feats = self.convnet(imgs, train=train)
         return model_feats
 
+    def save_positions(self, path):
+        pass
+
 

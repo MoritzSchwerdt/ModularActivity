@@ -1,6 +1,6 @@
 import os
 from collections import defaultdict
-from typing import Any
+from typing import Any, Optional
 
 import jax
 import numpy as np
@@ -10,7 +10,7 @@ from flax.training import train_state, checkpoints
 from jax import random
 from torch.utils.tensorboard import SummaryWriter
 
-from config import CHECKPOINT_PATH
+from config import CHECKPOINT_PATH, PERCENTAGE_SPATIAL_GRADIENTS
 
 
 class TrainState(train_state.TrainState):
@@ -31,6 +31,8 @@ class TrainerModule:
                  weight_decay: float = 0.01,
                  seed: int = 42,
                  check_val_every_n_epoch: int = 1,
+                 aggr_mode: str = 'scalar',
+                 lambdas_spatial: Any = [0],
                  **model_hparams):
         """
         Module for summarizing all common training functionalities.
@@ -46,21 +48,25 @@ class TrainerModule:
             check_val_every_n_epoch - With which frequency to validate the model
         """
         super().__init__()
+        self.aggr_mode = aggr_mode
         self.lr = lr
         self.weight_decay = weight_decay
         self.seed = seed
         self.check_val_every_n_epoch = check_val_every_n_epoch
+        self.lambdas_spatial = lambdas_spatial
         # Create empty model. Note: no parameters yet
         self.eval_key = eval_key
         self.model_name = model_name
         self.model = model_class(**model_hparams)
         # Prepare logging
         self.log_dir = os.path.join(CHECKPOINT_PATH, f'{self.model_name}/')
+        os.makedirs(self.log_dir, exist_ok=True)
         self.logger = SummaryWriter(log_dir=self.log_dir)
         # Create jitted training and eval functions
         self.create_functions()
         # Initialize model
         self.init_model(exmp_imgs)
+        print(f"[TensorBoard] Logging to: {os.path.abspath(self.log_dir)}")
 
     def create_functions(self):
         # To be implemented in sub-classes
@@ -70,7 +76,7 @@ class TrainerModule:
         # Initialize model
         rng = random.PRNGKey(self.seed)
         rng, init_rng = random.split(rng)
-        variables = self.model.init(init_rng, exmp_imgs)
+        variables = self.model.init(init_rng, exmp_imgs, rng)
         self.state = TrainState(step=0,
                                 apply_fn=self.model.apply,
                                 params=variables['params'],
@@ -98,7 +104,7 @@ class TrainerModule:
                                        rng=self.state.rng,
                                        tx=optimizer)
 
-    def train_model(self, train_loader, val_loader, num_epochs=200):
+    def train_model(self, train_loader, val_loader, num_epochs=200, save_every=5):
         # Train model for defined number of epochs
         # We first need to create optimizer and the scheduler for the given number of epochs
         self.init_optimizer(num_epochs, len(train_loader))
@@ -112,14 +118,23 @@ class TrainerModule:
                     self.logger.add_scalar(f'val/{key}', eval_metrics[key], global_step=epoch_idx)
                 if eval_metrics[self.eval_key] >= best_eval:
                     best_eval = eval_metrics[self.eval_key]
-                    self.save_model(step=epoch_idx)
+                    self.save_model(step=epoch_idx, subdir=None, overwrite=True)
+
+                # Save periodic snapshot into a dedicated subdir
+                if save_every > 0 and (epoch_idx % save_every == 0):
+                    epoch_subdir = os.path.join(self.log_dir, f'epoch_{epoch_idx:03d}')
+                    # keep=1 ensures only a single checkpoint file in that subdir (optional)
+                    self.save_model(step=epoch_idx, subdir=epoch_subdir, overwrite=True, keep=1)
+
                 self.logger.flush()
 
     def train_epoch(self, data_loader, epoch):
         # Train model for one epoch, and log avg metrics
         metrics = defaultdict(float)
         for batch in tqdm(data_loader, desc='Training', leave=False):
-            self.state, batch_metrics = self.train_step(self.state, batch)
+            lambda_spatial = self.lambdas_spatial[epoch]
+            p_t = PERCENTAGE_SPATIAL_GRADIENTS[epoch]
+            self.state, batch_metrics = self.train_step(state=self.state, batch=batch, lambda_spatial=lambda_spatial, aggr_mode=self.aggr_mode, p_t=p_t)
             for key in batch_metrics:
                 metrics[key] += batch_metrics[key]
         num_train_steps = len(data_loader)
@@ -140,14 +155,33 @@ class TrainerModule:
         metrics = {key: metrics[key].item() / count for key in metrics}
         return metrics
 
-    def save_model(self, step=0):
+    def save_model(self,
+                   step: int = 0,
+                   subdir: Optional[str] = None,
+                   overwrite: bool = True,
+                   keep: Optional[int] = None):
         # Save current model at certain training iteration
-        checkpoints.save_checkpoint(ckpt_dir=self.log_dir,
-                                    target={'params': self.state.params,
-                                            'batch_stats': self.state.batch_stats},
-                                    step=step,
-                                    overwrite=True)
 
+        target = {
+            'params': self.state.params,
+            'batch_stats': self.state.batch_stats
+        }
+
+        ckpt_dir = self.log_dir if subdir is None else subdir
+        os.makedirs(ckpt_dir, exist_ok=True)
+
+        # Forward keep only if it's provided to avoid changing default behavior.
+        if keep is not None:
+            checkpoints.save_checkpoint(ckpt_dir=ckpt_dir,
+                                        target=target,
+                                        step=step,
+                                        overwrite=overwrite,
+                                        keep=keep)
+        else:
+            checkpoints.save_checkpoint(ckpt_dir=ckpt_dir,
+                                        target=target,
+                                        step=step,
+                                        overwrite=overwrite)
     def load_model(self, pretrained=False):
         # Load model. We use different checkpoint for pretrained models
         if not pretrained:
