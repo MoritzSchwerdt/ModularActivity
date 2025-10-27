@@ -365,7 +365,7 @@ def sample_neighbors_batch_vectorized(key, positions, centers, radii, n_neighbor
     sq_distances = jnp.linalg.norm((centers[:, None] - positions[None, :]), ord=2, axis=-1)
 
     # Mask of valid neighbors
-    mask = sq_distances <= radii[:, None]
+    mask = sq_distances <= ((1+radii[:, None]) ** 2 - 1)
     n_valid = jnp.sum(mask, axis=1)
 
     # potential probs based on distance to center:

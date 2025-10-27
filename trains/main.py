@@ -15,7 +15,7 @@ def train_simclr():
     logger.info("Initializing SimCLR trainer...")
     exmp_imgs = parallel_augment(random.PRNGKey(0), next(iter(train_loader)))
 
-    lambdas_spatial = jnp.linspace(LAMBDA_SPATIAL, LAMBDA_SPATIAL/20, 150)
+    lambdas_spatial = jnp.linspace(LAMBDA_SPATIAL, LAMBDA_SPATIAL/20, 15)
     loss_params = {"correlation_mode":"TDANN"}
 
     trainer = SimCLRPositionTrainer(
@@ -26,7 +26,7 @@ def train_simclr():
     )
 
     logger.info("Starting training loop...")
-    trainer.train_model(train_loader, val_loader, num_epochs=100, save_every=5)
+    trainer.train_model(train_loader, val_loader, num_epochs=15, save_every=5)
 
 if __name__ == "__main__":
     logging.basicConfig(

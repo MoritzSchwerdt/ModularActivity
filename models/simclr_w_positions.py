@@ -167,13 +167,15 @@ class SimCLRWithPosition(nn.Module):
         layers = list(self.network_positions.positions.keys())
         conv_outputs = self.convnet(imgs, train=train)
         model_feats_list = tuple(conv_outputs[k] for k in layers)
+        #model_neighborhood_feats_list = tuple(conv_outputs[k][self.spatial_data.neighborhoods[k]] for i,k in enumerate(layers))
+        #model_neighborhoods = tuple(self.spatial_data.neighborhoodsk[k] for k in layers)
+        #[(i,conv_outputs[k].shape) for i,k in enumerate(layers)]
 
         feats = self.head(conv_outputs["fc"])
 
         computed_simclr_loss, metrics = self._simclr_loss(feats)
 
         computed_spatial_loss = spatial_correlation_loss(self.spatial_data, model_feats_list, key, self.loss_params['correlation_mode'])
-        dim_eff = compute_effective_dimensionality(model_feats_list)
 
         # Compute spatial regularization
         #computed_spatial_loss = spatial_loss_jit(self.spatial_data, model_feats_list, key)
@@ -183,7 +185,6 @@ class SimCLRWithPosition(nn.Module):
         else:
             total_loss = jnp.stack([computed_simclr_loss, computed_spatial_loss])
         #metrics['total_loss'] = computed_simclr_loss + computed_spatial_loss
-        metrics["participation_ratio"] = dim_eff
         metrics["loss_spatial"] = computed_spatial_loss
         metrics["loss_simclr"] = computed_simclr_loss
         #metrics["loss_total"] = total_loss
@@ -194,8 +195,15 @@ class SimCLRWithPosition(nn.Module):
         model_feats = self.convnet(imgs, train=train)
         return model_feats["block4_1"].mean(axis=(1, 2))
 
+    def apply_convnet(self, imgs, train: bool = False):
+        # call the convnet submodule and return its activations
+        return self.convnet(imgs, train=train)
+
     def get_positions(self):
         return self.network_positions
+
+    def get_spatial_data(self):
+        return self.spatial_data
 
     def save_positions(self, path):
         self.network_positions.save(path)

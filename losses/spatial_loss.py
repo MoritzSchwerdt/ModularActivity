@@ -226,7 +226,8 @@ def spatial_correlation_loss(spatial_data : SpatialData,model_feats,key, mode="T
 
     def get_target_correlation(distances, mode, r0, radius):
         #jax.debug.breakpoint()
-        rel_distances = distances / (radius[:,None,None] + eps)
+        max_possible_dist = (1+radius) ** 2 - 1
+        rel_distances = distances / (max_possible_dist[:,None,None] + eps)
 
         positive = jnp.exp(-4 * rel_distances)
         #mexican = jnp.exp(-(rel_distances / r0) ** 2) - 0.6 * jnp.exp(-(rel_distances / (2 * r0)) ** 2)
@@ -253,9 +254,9 @@ def spatial_correlation_loss(spatial_data : SpatialData,model_feats,key, mode="T
         tri_idx = jnp.tril_indices(response_corr.shape[0], k=-1)
         #add epsilon for numeric stability, as 0 variance will break into nan
         r = response_corr[tri_idx]
-        r = r + eps * (1.0 + jnp.arange(r.shape[0], dtype=r.dtype))
+        #r = r + eps * (1.0 + jnp.arange(r.shape[0], dtype=r.dtype))
         t = target_corr[tri_idx]
-        t = t + eps * (1.0 + jnp.arange(t.shape[0], dtype=t.dtype))
+        #t = t + eps * (1.0 + jnp.arange(t.shape[0], dtype=t.dtype))
 
         #corrcoeff computes correlation matrix, looking at covariance
         corr_alignment = jnp.corrcoef(jnp.stack([r, t]))[0, 1]
@@ -287,14 +288,15 @@ def spatial_correlation_loss(spatial_data : SpatialData,model_feats,key, mode="T
             lambda x, k: jnp.corrcoef(x + eps * random.normal(k, x.shape), rowvar=False)
         )(selected_responses, random.split(subkey, selected_responses.shape[0]))
 
-        jax.debug.breakpoint()
 
         target_corr = get_target_correlation(neighborhood_dists, mode, r0, sampled_radii)
+
+
         losses, corr_alignment = jax.vmap(neighborhood_loss, in_axes=(0,0,0))(response_similarity, neighborhood_dists, target_corr)
         total_losses.append(jnp.mean(losses))
         # store scalar debug info
 
-        """debug_info.append({
+        debug_info.append({
             "layer": i,
             "feats_shape": feats.shape,
             "position_shape": position.shape,
@@ -307,7 +309,9 @@ def spatial_correlation_loss(spatial_data : SpatialData,model_feats,key, mode="T
             "response_similarity_max": jnp.max(response_similarity),
             "corr_alignment": corr_alignment,
             "layer_loss": jnp.mean(losses),
-        })"""
+        })
+
+    #jax.debug.breakpoint()
 
     #jax.debug.breakpoint()
     return jnp.mean(jnp.stack(total_losses))
@@ -315,29 +319,29 @@ def spatial_correlation_loss(spatial_data : SpatialData,model_feats,key, mode="T
 @jax.jit
 def effective_dimensionality(features, eps=1e-8):
     """
-    Computes effective dimensionality (participation ratio)
-    for feature matrices with n_features >> n_samples.
-    Uses SVD for numerical stability.
+    Numerically stable participation ratio (effective dimensionality)
+    using the Gram matrix trick for n_features >> n_samples.
+
+    D_eff = (Σ λ_i)^2 / Σ λ_i^2
+    where λ_i are the nonzero eigenvalues of the covariance matrix.
     """
     # Center features
-    features = features - jnp.mean(features, axis=0, keepdims=True)
-    features = features.reshape(features.shape[0], -1)
-    features = jnp.nan_to_num(features, nan=0.0, posinf=0.0, neginf=0.0)
-    features = features.astype(jnp.float32)
+    X = features.reshape(features.shape[0], -1)
+    X = X - jnp.mean(X, axis=0, keepdims=True)
+    X = jnp.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+    X = X.astype(jnp.float32)
 
-    n_samples = features.shape[0]
+    n_samples = X.shape[0]
+    if n_samples < 2:
+        return jnp.array(1.0, dtype=jnp.float32)
 
-    # Compute singular values (economy SVD)
-    s = jnp.linalg.svd(features, compute_uv=False)
+    G = (X @ X.T) / (n_samples - 1)
+    eigvals = jnp.linalg.eigvalsh(G)
+    eigvals = jnp.maximum(eigvals, 0.0)  # clip negatives due to numerical noise
 
-    # Convert to covariance eigenvalues
-    eigvals = (s ** 2) / jnp.maximum(n_samples - 1, 1)
-    eigvals = jnp.maximum(eigvals, eps)
-
-    # Participation ratio
-    numerator = jnp.sum(eigvals) ** 2
-    denominator = jnp.sum(eigvals ** 2)
-    D_eff = numerator / denominator
+    total = jnp.sum(eigvals) + eps
+    eigvals_norm = eigvals / total
+    D_eff = 1.0 / jnp.sum(eigvals_norm ** 2)
 
     return D_eff.astype(jnp.float32)
 
@@ -345,5 +349,6 @@ def effective_dimensionality(features, eps=1e-8):
 @jax.jit
 def compute_effective_dimensionality(features_list):
     """Compute mean effective dimensionality across layers."""
+
     eff_dims = [effective_dimensionality(f) for f in features_list]
     return jnp.mean(jnp.stack(eff_dims)).astype(jnp.float32)

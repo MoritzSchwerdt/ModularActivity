@@ -6,6 +6,7 @@ from jax import random
 import jax.numpy as jnp
 
 from data.augmentations import parallel_augment
+from losses.spatial_loss import compute_effective_dimensionality
 from models.simclr import SimCLR
 from models.simclr_w_positions import SimCLRWithPosition
 from training.trainer import TrainerModule
@@ -31,11 +32,13 @@ class SimCLRPositionTrainer(TrainerModule):
                                     lambda_spatial=lambda_spatial,
                                     mutable=['batch_stats'] if train else False)
             (loss, metrics), new_model_state = outs if train else (outs, None)
+
+            metrics['lambda_spatial'] = lambda_spatial
             return loss, (metrics, new_model_state)
 
         # Training function
         @partial(jax.jit, static_argnames=['aggr_mode', 'eps'])
-        def train_step(state, batch, lambda_spatial, p_t=None, aggr_mode="scalar", eps=1e-8):
+        def _train_step(state, batch, lambda_spatial, p_t=None, aggr_mode="scalar", eps=1e-8):
             rng, forward_rng = random.split(state.rng)
             if aggr_mode == "scalar":
                 loss_fn = lambda params: calculate_loss(params,
@@ -126,9 +129,47 @@ class SimCLRPositionTrainer(TrainerModule):
                                              jnp.ones(1),
                                              summed=False,
                                              train=False)
+
+            # Compute effective dimensionality from the conv_outputs
+            network_positions = self.model.apply({'params': state.params, 'batch_stats': state.batch_stats}, method=SimCLRWithPosition.get_positions)
+            conv_outputs = self.model.apply({'params': state.params, 'batch_stats': state.batch_stats}, batch, train=False, method=SimCLRWithPosition.apply_convnet)
+            spatial_data = self.model.apply({'params': state.params, 'batch_stats': state.batch_stats}, method=SimCLRWithPosition.get_spatial_data)
+            layers = list(network_positions.positions.keys())
+
+            model_feats_list = tuple(conv_outputs[k] for k in layers)
+
+            # Flatten features per layer for ED calculation
+            model_spatial_feats = [
+                feats.reshape(feats.shape[0], -1)[:, spatial_data.neighborhoods[i]]
+                for i, feats in enumerate(model_feats_list)
+            ]
+
+            dim_eff_neighborhood = compute_effective_dimensionality(tuple(model_spatial_feats))
+            dim_eff_all = compute_effective_dimensionality(model_feats_list)
+
+            metrics["participation_ratio"] = dim_eff_neighborhood
+            metrics["participation_ratio_all"] = dim_eff_all
+
+
+            # Optional: neighborhood flattening or reshaping like before
+            #model_spatial_loss = []
+            #for i, k in enumerate(layers):
+            #    batch_shape = conv_outputs[k].shape[0]
+            #    flattend_feats = conv_outputs[k].reshape(batch_shape, -1)
+            #    neighborhood_feats = flattend_feats[:, self.model.spatial_data.neighborhoods[i]]
+            #    model_spatial_loss.append(neighborhood_feats)
+
+            # Compute effective dimensionality
+            #dim_eff = compute_effective_dimensionality(tuple(model_spatial_loss))
+            #metrics["participation_ratio"] = dim_eff
+
+
             return metrics
 
         # jit for efficiency
-        self.train_step = train_step
+        self.train_step = jax.jit(
+            partial(_train_step),
+            static_argnames=['aggr_mode', 'eps']
+        )
         # self.train_step = jax.jit(train_step)
         self.eval_step = jax.jit(eval_step)
